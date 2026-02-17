@@ -4,8 +4,8 @@ module Accum_unit #(
 )(
     input  logic                 clk,
     input  logic                 rst,   // active-high reset
-    input  logic                 clr,
-    input  logic                 en,    // accumulate when 1
+    input  logic                 ld,
+    input logic                  clr,  
     input  logic [iwidth-1:0]    din,
     output logic [owidth-1:0]    acc
 );
@@ -15,7 +15,9 @@ module Accum_unit #(
             acc <= '0;
         else if (clr)
             acc <= '0;
-        else if (en)
+        else if (ld)
+            acc <= din;
+        else 
             acc <= acc + din;   // wraps modulo 2^owidth
     end
 
