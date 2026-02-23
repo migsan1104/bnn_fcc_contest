@@ -20,7 +20,7 @@ module BRAM #(
     output logic [DATA_W-1:0]    b_rdata
 );
 
-  // Vendor inference hints ; ignored if unsupported)
+  // Inference for the tool so it uses on chip ram as opposed to LUTs ; ignored if unsupported by tool
   (* ram_style = "block" *) logic [DATA_W-1:0] mem [0:DEPTH-1];
 
   // Port A: sync read/write
