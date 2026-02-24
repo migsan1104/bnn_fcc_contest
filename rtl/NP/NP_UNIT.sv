@@ -20,13 +20,42 @@ module NP_UNIT #(
     output logic valid_acc
 );
 
-  logic acc_ld;
-  logic acc_clr;
+  localparam int ACC_W = $clog2(TOTAL_BITS_NEURON+1);
 
-  // fsm
-  NP_FSM #(
-    .LAT(LAT)
-  ) u_fsm (
+  logic acc_ld, acc_clr;
+
+  //==================================================
+  // Threshold register
+  // - Load once at start of neuron 
+  // - Clear whenever valid_out asserts 
+  //==================================================
+  logic [ACC_W-1:0] threshold_r;
+  logic             have_threshold;
+
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      threshold_r    <= '0;
+      have_threshold <= 1'b0;
+    end else begin
+      // Clear after producing an output
+      if (valid_out) begin
+        threshold_r    <= '0;
+        have_threshold <= 1'b0;
+      end
+
+      // Load threshold on first valid_in of a neuron window
+      // (only if we don't already have one latched)
+      if (valid_in && !have_threshold) begin
+        threshold_r    <= threshold;
+        have_threshold <= 1'b1;
+      end
+    end
+  end
+
+  //==================================================
+  // FSM
+  //==================================================
+  NP_FSM #(.LAT(LAT)) u_fsm (
     .clk       (clk),
     .rst       (rst),
     .valid_in  (valid_in),
@@ -37,7 +66,9 @@ module NP_UNIT #(
     .valid_acc (valid_acc)
   );
 
-  // datapath
+  //==================================================
+  // Datapath
+  //==================================================
   NP_DP #(
     .PW(PW),
     .TOTAL_BITS_NEURON(TOTAL_BITS_NEURON)
@@ -48,7 +79,7 @@ module NP_UNIT #(
     .w              (w),
     .acc_ld         (acc_ld),
     .acc_clr        (acc_clr),
-    .threshold      (threshold),
+    .threshold      (threshold_r),
     .popcount_total (popcount_total),
     .y              (y)
   );

@@ -29,10 +29,8 @@ module BRAM #(
     if (a_en) begin
       if (a_we) begin
         mem[a_addr] <= a_wdata;
-        a_rdata     <= a_wdata;   // write-first
-      end else begin
-        a_rdata     <= mem[a_addr];
       end
+      a_rdata     <= mem[a_addr]; 
     end
   end
 
@@ -41,10 +39,9 @@ module BRAM #(
     if (b_en) begin
       if (b_we) begin
         mem[b_addr] <= b_wdata;
-        b_rdata     <= b_wdata;   // write-first
-      end else begin
-        b_rdata     <= mem[b_addr];
-      end
+      end     
+      b_rdata     <= mem[b_addr];
+      
     end
   end
 
