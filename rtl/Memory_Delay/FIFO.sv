@@ -1,147 +1,170 @@
-module  FIFO #(
-  parameter int W_WIDTH = 64,                 // write width
-  parameter int R_WIDTH = 8,                  // read interface width
-  parameter int DEPTH   = 256,                // number of W_WIDTH words stored , assumed to be a power of 2
-  parameter int PFULL_MARGIN = 32             // programmable full
+module FIFO #(
+  parameter int W_WIDTH        = 64,   // write width
+  parameter int R_WIDTH        = 8,    // read width (assumed W_WIDTH > R_WIDTH and divides evenly)
+  parameter int DEPTH          = 256,  // number of W_WIDTH words stored, assumed power of 2
+  parameter int PFULL_MARGIN   = 32,   // pfull asserts when only this many free WRITE words remain
+  parameter int PEMPTY_MARGIN  = 5     // pempty asserts when stored WRITE words are less than this
 )(
   input  logic                 clk,
-  input  logic                 rst,            // synchronous active-high reset
+  input  logic                 rst,      // synchronous active-high reset
 
-  input  logic                 wr_en,          // push one W_WIDTH word when high
+  input  logic                 wr_en,    // push one W_WIDTH word when high
   input  logic [W_WIDTH-1:0]   wr_data,
-  output logic                 full,           // completely full
-  output logic                 pfull,          // programable full
+  output logic                 full,     // completely full
+  output logic                 pfull,    // programmable full
 
-  input  logic                 rd_en,          // pop one R_WIDTH chunk when high
+  input  logic                 rd_en,    // pop one R_WIDTH chunk when high
   output logic [R_WIDTH-1:0]   rd_data,
-  output logic                 rd_valid,       // pulses high for 1 cycle when rd_data updates
-  output logic                 empty           // 1 when no readable chunk is available right now
+  output logic                 rd_valid, // pulses high for 1 cycle when rd_data updates
+  output logic                 empty,    // 1 when no readable chunk is available right now
+  output logic                 pempty    // 1 when stored words < PEMPTY_MARGIN
 );
 
-  localparam int ADDR_W  = $clog2(DEPTH);           // bits to address DEPTH words
-  localparam int COUNT_W = $clog2(DEPTH+1);         // bits to count amount of words we are currently storing
-  localparam int R_PER_W = W_WIDTH / R_WIDTH;       // number of read slices in one write word
-  localparam int SLICE_W = $clog2(R_PER_W);         // bits to index slices inside a word
+  localparam int ADDR_W  = $clog2(DEPTH);     // bits to address DEPTH words
+  localparam int COUNT_W = $clog2(DEPTH+1);   // bits to count stored words 0..DEPTH
+  localparam int R_PER_W = W_WIDTH / R_WIDTH; // number of read slices in one write word
+  localparam int SLICE_W = $clog2(R_PER_W);   // bits to index slices inside a word
 
-  logic [W_WIDTH-1:0] mem [0:DEPTH-1];              // storage array , inferred Block RAM
+  // storage array , inferred Block RAM
+  logic [W_WIDTH-1:0] mem [0:DEPTH-1];
 
-  logic [ADDR_W-1:0]  wptr;                         // points to next memory location to write
-  logic [ADDR_W-1:0]  rptr;                         // points to next memory location to fetch into buffers
+  // pointers in memory space (W_WIDTH words)
+  logic [ADDR_W-1:0]  wptr;                  // next memory location to write
+  logic [ADDR_W-1:0]  rptr;                  // next memory location to fetch into buffers
 
-  logic [COUNT_W-1:0] word_count;                   // number of W_WIDTH words currently in the FIFO (includes buffered words)
+  // occupancy in W_WIDTH words (includes words buffered in cur/next)
+  logic [COUNT_W-1:0] word_count;
 
-  logic [W_WIDTH-1:0] cur_buf;                      // current buffered W_WIDTH word we are slicing out to rd_data
-  logic [W_WIDTH-1:0] next_buf;                     // next buffered W_WIDTH word to allow seamless word-to-word streaming
-  logic               cur_valid;                    // 1 when cur_buf contains a valid word
-  logic               next_valid;                   // 1 when next_buf contains a valid word
-  logic [SLICE_W-1:0] cur_slice;                    // index of which R_WIDTH slice to output next from cur_buf
+  // two-word prefetch buffers to hide BRAM read latency between words
+  logic [W_WIDTH-1:0] cur_buf;               // current buffered word being sliced
+  logic [W_WIDTH-1:0] next_buf;              // next buffered word to avoid bubbles
+  logic               cur_valid;             // cur_buf contains a valid word
+  logic               next_valid;            // next_buf contains a valid word
+  logic [SLICE_W-1:0] cur_slice;             // which slice of cur_buf to output next
 
-  logic [ADDR_W-1:0]  r_addr;                       // address presented to the internal synchronous read port
-  logic [W_WIDTH-1:0] mem_rdata;                    // data returned from memory 1 cycle after r_addr is set
-  logic               fetch_pending;                // 1 when we issued a read and must capture mem_rdata next cycle
-  logic               fetch_to_next;                // 0 means load cur_buf, 1 means load next_buf on fetch completion
+  // synchronous read interface to mem
+  logic [ADDR_W-1:0]  r_addr;                // address presented to BRAM read port
+  logic [W_WIDTH-1:0] mem_rdata;             // data returned from BRAM one cycle later
+  logic               fetch_pending;         // we issued a read, capture mem_rdata next cycle
+  logic               fetch_to_next;         // 0 load cur_buf, 1 load next_buf
 
-  logic do_write;                                   // 1 when a write is accepted this cycle
-  logic do_read;                                    // 1 when a read slice is accepted this cycle
-  logic do_pop_word;                                // 1 when the read slice consumes the last slice of cur_buf
+  // internal control
+  logic do_write;                            // accepted write this cycle
+  logic do_read;                             // accepted read slice this cycle
+  logic do_pop_word;                         // read consumed the last slice of cur_buf
 
-  logic [COUNT_W-1:0] buf_words;                    // number of buffered words (0,1,2)
-  logic [COUNT_W-1:0] mem_words_remaining;          // number of words still sitting only in memory (not yet buffered)
-  logic [COUNT_W-1:0] pfull_threshold;              // computed threshold = DEPTH - PFULL_MARGIN
+  // bookkeeping for prefetch decision
+  logic [COUNT_W-1:0] buf_words;             // number of buffered words (0,1,2)
+  logic [COUNT_W-1:0] mem_words_remaining;   // words still in mem but not yet buffered
 
+  // status thresholds
+  logic [COUNT_W-1:0] pfull_threshold;
+
+  // tidy status outputs
+  assign full  = (word_count == DEPTH[COUNT_W-1:0]);
+  assign pfull_threshold = DEPTH[COUNT_W-1:0] - PFULL_MARGIN[COUNT_W-1:0];
+  assign pfull = (word_count >= pfull_threshold);
+  assign empty = !cur_valid;                 // readable-empty: no chunk available right now
+  assign pempty = (word_count < PEMPTY_MARGIN[COUNT_W-1:0]);
+
+  // operation qualification
+  always_comb begin
+    do_write    = wr_en && !full;            // write allowed only when not full
+    do_read     = rd_en && cur_valid;        // read allowed only when we have current word buffered
+    do_pop_word = do_read && (cur_slice == R_PER_W-1);
+  end
+
+  // BRAM modeling for synthesis inference: synchronous read + synchronous write
   always_ff @(posedge clk) begin
-    mem_rdata <= mem[r_addr];                       // synchronous read model so tools can map to BRAM
-    if (do_write) mem[wptr] <= wr_data;             // synchronous write into memory
+    mem_rdata <= mem[r_addr];               // tools treat this as sync read
+    if (do_write) mem[wptr] <= wr_data;     // write into memory
   end
 
+  // buffered-word accounting for prefetch scheduling
   always_comb begin
-    buf_words = (cur_valid ? 1 : 0) + (next_valid ? 1 : 0);              // buffered words count helps prefetch decision
-    mem_words_remaining = word_count - buf_words;                         // words still in memory that are not buffered yet
+    buf_words = (cur_valid ? 1 : 0) + (next_valid ? 1 : 0);
+    mem_words_remaining = word_count - buf_words;
   end
 
-  always_comb full  = (word_count == DEPTH[COUNT_W-1:0]);                 // full means no more W_WIDTH words can be stored
-  always_comb begin
-    pfull_threshold = DEPTH[COUNT_W-1:0] - PFULL_MARGIN[COUNT_W-1:0];     // pfull triggers when only PFULL_MARGIN free slots remain
-    pfull = (word_count >= pfull_threshold);
-  end
-  always_comb empty = !cur_valid;                                         // empty means we cannot output a read slice right now
-
-  always_comb begin
-    do_write    = wr_en && !full;                                         // accept write only when there is space
-    do_read     = rd_en && cur_valid;                                     // accept read only when we have a current word buffered
-    do_pop_word = do_read && (cur_slice == R_PER_W-1);                    // last slice means we finished this buffered word
-  end
-
+  // main sequential control
   always_ff @(posedge clk) begin
     if (rst) begin
-      wptr          <= '0;                                                // reset write pointer
-      rptr          <= '0;                                                // reset fetch pointer
-      word_count    <= '0;                                                // FIFO starts empty
+      wptr          <= '0;
+      rptr          <= '0;
+      word_count    <= '0;
+
       cur_buf       <= '0;
       next_buf      <= '0;
       cur_valid     <= 1'b0;
       next_valid    <= 1'b0;
       cur_slice     <= '0;
+
       r_addr        <= '0;
       fetch_pending <= 1'b0;
       fetch_to_next <= 1'b0;
+
       rd_data       <= '0;
       rd_valid      <= 1'b0;
     end else begin
-      rd_valid <= 1'b0;                                                   // rd_valid is a one-cycle pulse when rd_data updates
+      rd_valid <= 1'b0;                     // pulse only when we actually output a slice
 
-      if (do_write) begin                                                 // writing pushes a full W_WIDTH word into FIFO
-        wptr <= wptr + 1;                                                 // advance write pointer to next slot
+      // advance write pointer on accepted write
+      if (do_write) begin
+        wptr <= wptr + 1;
       end
 
-      if (!fetch_pending) begin                                           // issue at most one memory read request at a time
-        if (!cur_valid && (word_count != '0)) begin                       // if no current word buffered but FIFO has data, fetch cur_buf
-          r_addr        <= rptr;                                          // present address of next word to fetch
-          fetch_pending <= 1'b1;                                          // remember that mem_rdata will be valid next cycle
-          fetch_to_next <= 1'b0;                                          // next cycle, load cur_buf
+      // issue at most one BRAM read request at a time
+      if (!fetch_pending) begin
+        if (!cur_valid && (word_count != '0)) begin
+          r_addr        <= rptr;            // fetch into cur_buf first
+          fetch_pending <= 1'b1;
+          fetch_to_next <= 1'b0;
         end else if (cur_valid && !next_valid && (mem_words_remaining != '0)) begin
-          r_addr        <= rptr;                                          // if cur exists and next is empty, prefetch next_buf
-          fetch_pending <= 1'b1;                                          // remember that mem_rdata will be valid next cycle
-          fetch_to_next <= 1'b1;                                          // next cycle, load next_buf
+          r_addr        <= rptr;            // prefetch next_buf while streaming cur_buf
+          fetch_pending <= 1'b1;
+          fetch_to_next <= 1'b1;
         end
       end
 
-      if (fetch_pending) begin                                            // complete the memory fetch and fill the correct buffer
+      // capture BRAM read result into the requested buffer
+      if (fetch_pending) begin
         if (!fetch_to_next) begin
-          cur_buf   <= mem_rdata;                                         // load current buffer with fetched word
-          cur_valid <= 1'b1;                                              // mark current buffer valid
-          cur_slice <= '0;                                                // start slicing from slice 0
+          cur_buf   <= mem_rdata;
+          cur_valid <= 1'b1;
+          cur_slice <= '0;
         end else begin
-          next_buf   <= mem_rdata;                                        // load next buffer with fetched word
-          next_valid <= 1'b1;                                             // mark next buffer valid
+          next_buf   <= mem_rdata;
+          next_valid <= 1'b1;
         end
-        rptr          <= rptr + 1;                                        // advance fetch pointer since we pulled one word from memory
-        fetch_pending <= 1'b0;                                            // clear pending flag
+        rptr          <= rptr + 1;          // consumed one word from memory into a buffer
+        fetch_pending <= 1'b0;
       end
 
-      if (do_read) begin                                                  // reading outputs one R_WIDTH slice each cycle
-        rd_data  <= cur_buf[cur_slice*R_WIDTH +: R_WIDTH];                // output the selected slice from current buffer
-        rd_valid <= 1'b1;                                                 // pulse valid for this output
+      // output read slices
+      if (do_read) begin
+        rd_data  <= cur_buf[cur_slice*R_WIDTH +: R_WIDTH];
+        rd_valid <= 1'b1;
 
         if (!do_pop_word) begin
-          cur_slice <= cur_slice + 1;                                     // move to the next slice in the same word
+          cur_slice <= cur_slice + 1;
         end else begin
-          if (next_valid) begin                                           // if next word is already prefetched, switch immediately with no bubble
-            cur_buf    <= next_buf;                                       // promote next word to be the current word
-            cur_valid  <= 1'b1;                                           // current remains valid
-            next_valid <= 1'b0;                                           // next is now empty and will be refilled by prefetch logic
-            cur_slice  <= '0;                                             // start slicing the new current word from slice 0
+          if (next_valid) begin
+            cur_buf    <= next_buf;         // seamless switch to next word
+            cur_valid  <= 1'b1;
+            next_valid <= 1'b0;
+            cur_slice  <= '0;
           end else begin
-            cur_valid <= 1'b0;                                            // if no next word buffered, we will fetch next on a later cycle
-            cur_slice <= '0;                                              // reset slice index for the next buffered word
+            cur_valid <= 1'b0;              // no prefetched word available, will fetch later
+            cur_slice <= '0;
           end
         end
       end
 
+      // update occupancy in W_WIDTH words
       case ({do_write, do_pop_word})
-        2'b10: word_count <= word_count + 1;                              // accepted write adds one W_WIDTH word to FIFO
-        2'b01: word_count <= word_count - 1;                              // finishing last slice removes one W_WIDTH word from FIFO
-        default: word_count <= word_count;                                // write+pop_word cancels out, or neither happens
+        2'b10: word_count <= word_count + 1; // write adds one word
+        2'b01: word_count <= word_count - 1; // finishing a word removes one word
+        default: word_count <= word_count;   // both or neither
       endcase
     end
   end
