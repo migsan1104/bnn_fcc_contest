@@ -4,58 +4,45 @@ module BRAM #(
     localparam int DEPTH = 1 << ADDR_W
 )(
     input  logic                 clk,
-    input  logic                 rst,          // synchronous reset for size counter
+    input  logic                 rst,      // synchronous reset for size counter
 
     // Port A
-    input  logic                 a_en,
-    input  logic                 a_we,
+    input  logic                 a_ren,
+    input  logic                 a_wen,
     input  logic [ADDR_W-1:0]    a_addr,
     input  logic [DATA_W-1:0]    a_wdata,
     output logic [DATA_W-1:0]    a_rdata,
 
     // Port B
-    input  logic                 b_en,
-    input  logic                 b_we,
+    input  logic                 b_ren,
+    input  logic                 b_wen,
     input  logic [ADDR_W-1:0]    b_addr,
     input  logic [DATA_W-1:0]    b_wdata,
     output logic [DATA_W-1:0]    b_rdata,
 
-    output logic [ADDR_W:0]      size          // number of writes minus reads (simple occupancy counter)
+    output logic [ADDR_W:0]      size      // occupancy counter
 );
 
   (* ram_style = "block" *) logic [DATA_W-1:0] mem [0:DEPTH-1];
 
-  // Port A: sync read/write
+  // dual-port synchronous read/write
+  // we assume that port A is write side and port b is read side
   always_ff @(posedge clk) begin
-    if (a_en) begin
-      if (a_we) begin
-        mem[a_addr] <= a_wdata;
-      end
-      a_rdata <= mem[a_addr];
-    end
+    if (a_wen) mem[a_addr] <= a_wdata;     // write port A
+    if (b_wen) mem[b_addr] <= b_wdata;     // write port B
+    if (a_ren) a_rdata <= mem[a_addr];     // read port A
+    if (b_ren) b_rdata <= mem[b_addr];     // read port B
   end
 
-  // Port B: sync read/write
-  always_ff @(posedge clk) begin
-    if (b_en) begin
-      if (b_we) begin
-        mem[b_addr] <= b_wdata;
-      end
-      b_rdata <= mem[b_addr];
-    end
-  end
-
-  // Simple size counter based on write/read events
-  // This does not look inside mem, so BRAM inference is preserved
+  // simple occupancy counter: +1 on write, -1 on read
   always_ff @(posedge clk) begin
     if (rst) begin
-      size <= '0;
+      size <= '0;                          // reset counter
     end else begin
-      case ({(a_en && a_we), (b_en && b_we)})
-        2'b10: if (size != DEPTH[ADDR_W:0]) size <= size + 1; // one write
-        2'b01: if (size != '0)              size <= size - 1; // one read (treated as "consume")
-        default: size <= size;
-      endcase
+      if (a_wen && !b_ren && size < DEPTH)
+        size <= size + 1;                  // push
+      else if (b_ren && !a_wen && size > 0)
+        size <= size - 1;                  // pop
     end
   end
 
