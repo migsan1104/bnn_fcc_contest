@@ -1,5 +1,4 @@
-module NP_Layer#(
-    parameter int PN = 8,  // number of parallel neuron processors
+module NP_Layer#(    parameter int PN = 8,  // number of parallel neuron processors
     parameter int PW = 8,  // parallel weights/inputs per NP
     parameter int TN = 16, // total inputs per neuron
     parameter int N  = 16, // number of neurons per NP accumulation
@@ -17,7 +16,7 @@ module NP_Layer#(
     input  logic [PN-1:0][PW-1:0] w_ram_a_data, // write data for weights RAM port A
     input  logic [PN-1:0][TW-1:0] t_ram_a_data, // write data for threshold RAM port A
 
-    input  logic [PN-1:0][PW-1:0] w_ram_b_data, // write data for weights RAM port B
+    input  logic  [PN-1:0][PW-1:0] w_ram_b_data, // write data for weights RAM port B
     input  logic [PN-1:0][TW-1:0] t_ram_b_data, // write data for threshold RAM port B
 
     input  logic [PN-1:0][W_addr-1:0]  w_ram_a_addr, // weights RAM port A address

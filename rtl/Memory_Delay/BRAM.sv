@@ -20,13 +20,13 @@ module BRAM #(
     input  logic [DATA_W-1:0]    b_wdata,
     output logic [DATA_W-1:0]    b_rdata,
 
-    output logic [ADDR_W:0]      size      // occupancy counter
+    output logic [ADDR_W:0]      size      // number of words written through port A
 );
 
   (* ram_style = "block" *) logic [DATA_W-1:0] mem [0:DEPTH-1];
 
   // dual-port synchronous read/write
-  // we assume that port A is write side and port b is read side
+  // we assume port A is the primary write side
   always_ff @(posedge clk) begin
     if (a_wen) mem[a_addr] <= a_wdata;     // write port A
     if (b_wen) mem[b_addr] <= b_wdata;     // write port B
@@ -34,15 +34,13 @@ module BRAM #(
     if (b_ren) b_rdata <= mem[b_addr];     // read port B
   end
 
-  // simple occupancy counter: +1 on write, -1 on read
+  // write counter: counts only port A writes
   always_ff @(posedge clk) begin
     if (rst) begin
       size <= '0;                          // reset counter
     end else begin
-      if (a_wen && !b_ren && size < DEPTH)
-        size <= size + 1;                  // push
-      else if (b_ren && !a_wen && size > 0)
-        size <= size - 1;                  // pop
+      if (a_wen && size < DEPTH)
+        size <= size + 1;                  // increment on port A write
     end
   end
 

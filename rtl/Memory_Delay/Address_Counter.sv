@@ -21,7 +21,7 @@ module Address_Counter #(
     will_run = (active || go) && !stall;
   end
 
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk or posedge rst) begin
     if (rst) begin
       active <= 1'b0;
       count  <= '0;
