@@ -12,6 +12,7 @@ module Input_Layer_tb;
   logic                 rst;      // Reset
   logic                 en;       // Enable latch
   logic [IN_W-1:0]      istream;  // Input vector
+  logic                 valid;    // NEW: DUT valid
   logic [OUT_W-1:0]     ostream;  // Output bits
 
   int passed;                     // Pass counter
@@ -31,6 +32,7 @@ module Input_Layer_tb;
     .rst(rst),
     .en(en),
     .istream(istream),
+    .valid(valid),        // NEW
     .ostream(ostream)
   );
 
@@ -57,6 +59,11 @@ module Input_Layer_tb;
       en <= 1'b1;                 // Latch outputs
       @(posedge clk); #1;         // Wait for registered output
 
+      if (valid !== 1'b1) begin   
+        $display("FAIL: valid not 1 when en=1 got=%0b time=%0t", valid, $time);
+        $fatal;
+      end
+
       if (ostream !== expected) begin
         $display("FAIL: ostream mismatch got=0x%0h expected=0x%0h time=%0t", ostream, expected, $time);
         $fatal;
@@ -66,6 +73,11 @@ module Input_Layer_tb;
 
       en <= 1'b0;                 // Disable latch
       @(posedge clk); #1;         // Advance one cycle
+
+      if (valid !== 1'b0) begin   // NEW
+        $display("FAIL: valid not 0 when en=0 got=%0b time=%0t", valid, $time);
+        $fatal;
+      end
 
       if (ostream !== hold_val) begin
         $display("FAIL: ostream changed while en=0 got=0x%0h expected_hold=0x%0h time=%0t", ostream, hold_val, $time);
