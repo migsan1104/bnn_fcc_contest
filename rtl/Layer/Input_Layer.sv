@@ -20,7 +20,7 @@ module Input_Layer #(
         for (i = 0; i < out_w; i++) begin
             logic [CHUNK_W-1:0] chunk;
             chunk = istream[i*CHUNK_W +: CHUNK_W];
-            ostream_next[i] = (chunk > THRESH);
+            ostream_next[i] = (chunk >= THRESH);
         end
     end
 

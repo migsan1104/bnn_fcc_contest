@@ -1,78 +1,226 @@
+`timescale 1ns / 1ps
+
 module NP_Layer#(
-    parameter int PN = 8,  // number of parallel neuron processors
-    parameter int PW = 8,  // parallel weights/inputs per NP
-    parameter int TN = 16, // total inputs per neuron
-    parameter int N  = 16, // number of neurons per NP accumulation
-    parameter int TW = 32, // threshold width
+    parameter int LAYER_ID = 0,
+    parameter int PN = 8,
+    parameter int PW = 8,
+    parameter int TN = 16,
+    parameter int N  = 16,
+    parameter int TW = 32,
     parameter int LAT = 4,
-    localparam int beats   = (TN + PW - 1) / PW,                 // number of beats needed to complete one neuron
-    localparam int TW_addr = (N <= 1) ? 1 : $clog2(N),            // threshold RAM address width, avoid 0-width
-    localparam int W_addr  = (beats*N <= 1) ? 1 : $clog2(beats*N) // weight RAM address width
+    localparam int beats   = (TN + PW - 1) / PW,
+    localparam int GROUPS  = (N + PN - 1) / PN,
+    localparam int TW_addr = (GROUPS <= 1) ? 1 : $clog2(GROUPS),
+    localparam int W_addr  = (beats * GROUPS <= 1) ? 1 : $clog2(beats * GROUPS)
 )(
     input  logic clk,
     input  logic rst,
+    input  logic [GROUPS-1:0] group_count,
+    input  logic [31:0] image_idx,
 
-    input  logic [PW-1:0] input_buffer, // PW-wide input from buffer
+    input  logic [PW-1:0] input_buffer,
 
-    input  logic [PN-1:0][PW-1:0] w_ram_a_data, // write data for weights RAM port A
-    input  logic [PN-1:0][TW-1:0] t_ram_a_data, // write data for threshold RAM port A
+    input  logic [PN-1:0][PW-1:0] w_ram_a_data,
+    input  logic [PN-1:0][TW-1:0] t_ram_a_data,
 
-    input  logic  [PN-1:0][PW-1:0] w_ram_b_data, // write data for weights RAM port B
-    input  logic [PN-1:0][TW-1:0] t_ram_b_data, // write data for threshold RAM port B
+    input  logic [PN-1:0][PW-1:0] w_ram_b_data,
+    input  logic [PN-1:0][TW-1:0] t_ram_b_data,
 
-    input  logic [PN-1:0][W_addr-1:0]  w_ram_a_addr, // weights RAM port A address
-    input  logic [PN-1:0][TW_addr-1:0] t_ram_a_addr, // threshold RAM port A address
+    input  logic [PN-1:0][W_addr-1:0]  w_ram_a_addr,
+    input  logic [PN-1:0][TW_addr-1:0] t_ram_a_addr,
 
-    input  logic [PN-1:0][W_addr-1:0]  w_ram_b_addr, // weights RAM port B address
-    input  logic [PN-1:0][TW_addr-1:0] t_ram_b_addr, // threshold RAM port B address
+    input  logic [PN-1:0][W_addr-1:0]  w_ram_b_addr,
+    input  logic [PN-1:0][TW_addr-1:0] t_ram_b_addr,
 
-    input  logic [PN-1:0] w_ram_wen_a, // write enable for weights RAM port A
-    input  logic [PN-1:0] w_ram_wen_b, // write enable for weights RAM port B
-    input  logic [PN-1:0] t_ram_wen_a, // write enable for threshold RAM port A
-    input  logic [PN-1:0] t_ram_wen_b, // write enable for threshold RAM port B
+    input  logic [PN-1:0] w_ram_wen_a,
+    input  logic [PN-1:0] w_ram_wen_b,
+    input  logic [PN-1:0] t_ram_wen_a,
+    input  logic [PN-1:0] t_ram_wen_b,
 
-    input  logic [PN-1:0] valid_in,    // valid into each NP
-    input  logic [PN-1:0] last_in,     // last-beat indicator into each NP
+    input  logic [PN-1:0] valid_in,
+    input  logic [PN-1:0] last_in,
 
-    input  logic [PN-1:0] w_ram_ren_b, // read enable array for weights RAM port B
-    input  logic [PN-1:0] t_ram_ren_b, // read enable array for threshold RAM port B
+    input  logic [PN-1:0] w_ram_ren_b,
+    input  logic [PN-1:0] t_ram_ren_b,
 
     output logic [PN-1:0] out,
-    output logic [PN-1:0][$clog2(N+1)-1:0] pop_out,
+    output logic [PN-1:0][$clog2(TN+1)-1:0] pop_out,
 
-    output logic [PN-1:0] valid_acc,   // per-NP accumulation-valid from NP_UNIT
-    output logic [PN-1:0] valid_out    // per-NP output-valid from NP_UNIT
+    output logic [PN-1:0] valid_acc,
+    output logic [PN-1:0] valid_out
 );
 
-  localparam int ACC_W = $clog2(N+1);                 // accumulator width used by threshold slice
-  localparam int REM   = TN % PW;                     // number of valid bits in last beat when TN not multiple of PW
-  localparam int LAST_VALID = (REM == 0) ? PW : REM;  // valid bits in last beat
+  localparam int POP_W      = $clog2(TN+1);
+  localparam int REM        = TN % PW;
+  localparam int LAST_VALID = (REM == 0) ? PW : REM;
+  localparam int DBG_GW     = (GROUPS <= 1) ? 1 : $clog2(GROUPS);
+  localparam int DBG_BW     = (beats  <= 1) ? 1 : $clog2(beats);
 
-  logic [PN-1:0][PW-1:0] w_from_ram;                  // weight beat from BRAM
-  logic [PN-1:0][TW-1:0] t_from_ram;                  // threshold word from BRAM
+  logic [PN-1:0][PW-1:0]    w_from_ram;
+  logic [PN-1:0][TW-1:0]    t_from_ram;
 
-  logic [PW-1:0]         last_mask;                   // mask of valid bits for last beat
-  logic [PN-1:0][PW-1:0] x_to_np;                     // possibly padded x beat
-  logic [PN-1:0][PW-1:0] w_to_np;                     // possibly padded w beat
+  logic [PW-1:0]            last_mask;
+  logic [PN-1:0][PW-1:0]    x_to_np;
+  logic [PN-1:0][PW-1:0]    w_to_np;
 
-  integer k;
+  logic [PN-1:0]            raw_out;
+  logic [PN-1:0][POP_W-1:0] raw_pop_out;
 
-  // Build a mask with LAST_VALID LSBs = 1 and padded MSBs = 0
+  // Threshold request delayed by 3 cycles before BRAM port B
+  logic [PN-1:0]              t_ram_ren_b_reg_0;
+  logic [PN-1:0]              t_ram_ren_b_reg_1;
+  logic [PN-1:0]              t_ram_ren_b_reg_2;
+
+  logic [PN-1:0][TW_addr-1:0] t_ram_b_addr_reg_0;
+  logic [PN-1:0][TW_addr-1:0] t_ram_b_addr_reg_1;
+  logic [PN-1:0][TW_addr-1:0] t_ram_b_addr_reg_2;
+
+  // Debug alignment
+  logic [PN-1:0][W_addr-1:0]  w_ram_b_addr_d1_dbg;
+  logic [PN-1:0]              w_ram_ren_b_d1_dbg;
+  logic [PN-1:0]              last_in_d1_dbg;
+  logic [PN-1:0]              valid_in_d1_dbg;
+  logic [PN-1:0][TW_addr-1:0] t_ram_b_addr_d1_dbg;
+  logic [PN-1:0]              t_ram_ren_b_d1_dbg;
+
+  // Debug beat tracking:
+  // - dbg_read_phase counts the read number within a neuron/group
+  // - dbg_group_count is the layer beat / group for READ_W debug
+  logic [DBG_GW-1:0] dbg_group_count;
+  logic [DBG_BW-1:0] dbg_read_phase;
+  logic              dbg_read_fire;
+
+  // Debug capture of the actual compare inputs used:
+  // latch on valid_acc, print on the later valid_out pulse
+  logic [PN-1:0][POP_W-1:0] pop_used_dbg;
+  logic [PN-1:0][POP_W-1:0] thr_used_dbg;
+  logic [PN-1:0][POP_W-1:0] thr_in_used_dbg;
+
+  assign dbg_read_fire = |w_ram_ren_b_d1_dbg;
+
+  // Build mask for partial final beat
   always_comb begin
+    int k;
     last_mask = '0;
     for (k = 0; k < LAST_VALID; k++) begin
       last_mask[k] = 1'b1;
     end
   end
 
-  // Pad only on last beat when TN is not a multiple of PW
+  // Feed NP inputs
   always_comb begin
+    int k;
     for (k = 0; k < PN; k++) begin
       x_to_np[k] = input_buffer;
       w_to_np[k] = w_from_ram[k];
       if ((REM != 0) && last_in[k] && valid_in[k]) begin
-        x_to_np[k] = input_buffer & last_mask;                 // padded x bits forced to 0
-        w_to_np[k] = (w_from_ram[k] & last_mask) | ~last_mask; // padded w bits forced to 1
+        x_to_np[k] = input_buffer & last_mask;
+        w_to_np[k] = (w_from_ram[k] & last_mask) | ~last_mask;
+      end
+    end
+  end
+
+  // Delay threshold read request by 3 cycles, this should line up with valid_acc
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      t_ram_ren_b_reg_0  <= '0;
+      t_ram_ren_b_reg_1  <= '0;
+      t_ram_ren_b_reg_2  <= '0;
+      t_ram_b_addr_reg_0 <= '0;
+      t_ram_b_addr_reg_1 <= '0;
+      t_ram_b_addr_reg_2 <= '0;
+    end else begin
+      t_ram_ren_b_reg_0  <= t_ram_ren_b;
+      t_ram_ren_b_reg_1  <= t_ram_ren_b_reg_0;
+      t_ram_ren_b_reg_2  <= t_ram_ren_b_reg_1;
+
+      t_ram_b_addr_reg_0 <= t_ram_b_addr;
+      t_ram_b_addr_reg_1 <= t_ram_b_addr_reg_0;
+      t_ram_b_addr_reg_2 <= t_ram_b_addr_reg_1;
+    end
+  end
+
+  // Debug-aligned read/control signals
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      w_ram_b_addr_d1_dbg <= '0;
+      w_ram_ren_b_d1_dbg  <= '0;
+      last_in_d1_dbg      <= '0;
+      valid_in_d1_dbg     <= '0;
+      t_ram_b_addr_d1_dbg <= '0;
+      t_ram_ren_b_d1_dbg  <= '0;
+    end else begin
+      w_ram_b_addr_d1_dbg <= w_ram_b_addr;
+      w_ram_ren_b_d1_dbg  <= w_ram_ren_b;
+      last_in_d1_dbg      <= last_in;
+      valid_in_d1_dbg     <= valid_in;
+
+      // Debug threshold path after the 3-cycle request delay
+      t_ram_b_addr_d1_dbg <= t_ram_b_addr_reg_2;
+      t_ram_ren_b_d1_dbg  <= t_ram_ren_b_reg_2;
+    end
+  end
+
+  // Debug beat counter:
+  // Hold the same BEAT label for "beats" consecutive READ_W events.
+  always_ff @(posedge clk or posedge rst) begin
+    if (rst) begin
+      dbg_group_count <= '0;
+      dbg_read_phase  <= '0;
+    end else begin
+      if (dbg_read_fire) begin
+        if (beats == 1) begin
+          dbg_read_phase <= '0;
+          if (dbg_group_count == GROUPS-1)
+            dbg_group_count <= '0;
+          else
+            dbg_group_count <= dbg_group_count + 1'b1;
+        end else begin
+          if (dbg_read_phase == beats-1) begin
+            dbg_read_phase <= '0;
+            if (dbg_group_count == GROUPS-1)
+              dbg_group_count <= '0;
+            else
+              dbg_group_count <= dbg_group_count + 1'b1;
+          end else begin
+            dbg_read_phase <= dbg_read_phase + 1'b1;
+          end
+        end
+      end
+    end
+  end
+  //DEBUG SCAFFHOLDING: THIS HELPS WITH LOOKING AT WAVE FORMS AND TRANSCRIPTS.
+  // Capture the exact popcount/threshold used on valid_acc,
+  // then print those same values later when valid_out pulses.
+  always_ff @(posedge clk or posedge rst) begin
+    int k;
+    if (rst) begin
+      pop_used_dbg    <= '0;
+      thr_used_dbg    <= '0;
+      thr_in_used_dbg <= '0;
+    end else begin
+      for (k = 0; k < PN; k++) begin
+        if (valid_acc[k]) begin
+          pop_used_dbg[k]    <= raw_pop_out[k];
+          thr_used_dbg[k]    <= t_from_ram[k][POP_W-1:0];
+          thr_in_used_dbg[k] <= t_from_ram[k][POP_W-1:0];
+        end
+      end
+    end
+  end
+
+  // What this does is mask the outputs essentially acting as a tkeep without layers
+  // this is for the case that Nuerons/PN is not divisible. 
+  always_comb begin
+    int k;
+    out     = '0;
+    pop_out = '0;
+    for (k = 0; k < PN; k++) begin
+      if (valid_out[k]) begin
+        out[k] = raw_out[k];
+      end
+      if (valid_acc[k]) begin
+        pop_out[k] = raw_pop_out[k];
       end
     end
   end
@@ -81,13 +229,14 @@ module NP_Layer#(
   generate
     for (i = 0; i < PN; i++) begin : GEN_NP
 
-      // weight RAM for NP i
       BRAM #(
         .DATA_W(PW),
         .ADDR_W(W_addr)
       ) u_wram (
         .clk     (clk),
         .rst     (rst),
+        .clear   (1'b0),
+        .dump_mem(1'b0),
         .a_ren   (1'b0),
         .a_wen   (w_ram_wen_a[i]),
         .a_addr  (w_ram_a_addr[i]),
@@ -101,31 +250,33 @@ module NP_Layer#(
         .size    ()
       );
 
-      // threshold RAM for NP i
       BRAM #(
         .DATA_W(TW),
         .ADDR_W(TW_addr)
       ) u_tram (
         .clk     (clk),
         .rst     (rst),
+        .clear   (1'b0),
+        .dump_mem(1'b0),
         .a_ren   (1'b0),
         .a_wen   (t_ram_wen_a[i]),
         .a_addr  (t_ram_a_addr[i]),
         .a_wdata (t_ram_a_data[i]),
         .a_rdata (),
-        .b_ren   (t_ram_ren_b[i]),
+        .b_ren   (t_ram_ren_b_reg_2[i]),
         .b_wen   (t_ram_wen_b[i]),
-        .b_addr  (t_ram_b_addr[i]),
+        .b_addr  (t_ram_b_addr_reg_2[i]),
         .b_wdata (t_ram_b_data[i]),
         .b_rdata (t_from_ram[i]),
         .size    ()
       );
 
-      // neuron processor
       NP_UNIT #(
-        .PW               (PW),
-        .TOTAL_BITS_NEURON(TN),
-        .LAT              (LAT)
+        .LAYER_ID          (LAYER_ID),
+        .LANE_ID           (i),
+        .PW                (PW),
+        .TOTAL_BITS_NEURON (TN),
+        .LAT               (LAT)
       ) u_np (
         .clk            (clk),
         .rst            (rst),
@@ -133,14 +284,62 @@ module NP_Layer#(
         .last_in        (last_in[i]),
         .x              (x_to_np[i]),
         .w              (w_to_np[i]),
-        .threshold      (t_from_ram[i][ACC_W-1:0]),
-        .popcount_total (pop_out[i]),
-        .y              (out[i]),
+        .threshold      (t_from_ram[i][POP_W-1:0]),
+        .popcount_total (raw_pop_out[i]),
+        .y              (raw_out[i]),
         .valid_out      (valid_out[i]),
         .valid_acc      (valid_acc[i])
       );
 
     end
   endgenerate
+
+  // ------------------------------------------------------------
+  // DEBUG: print the weight word read by each lane during compute
+  // ------------------------------------------------------------
+  integer dbg_i;
+  always_ff @(posedge clk) begin
+    if (!rst) begin
+      for (dbg_i = 0; dbg_i < PN; dbg_i++) begin
+        if (w_ram_ren_b_d1_dbg[dbg_i] && (LAYER_ID == 1)) begin
+          $display("[READ_W] IMG=%0d L=%0d  BEAT=%0d lane=%0d addr=%0d weight=%h data_in=%h last=%0b",
+            image_idx,
+            LAYER_ID,
+            dbg_group_count,
+            dbg_i,
+            w_ram_b_addr_d1_dbg[dbg_i],
+            w_from_ram[dbg_i],
+            x_to_np[dbg_i],
+            last_in_d1_dbg[dbg_i]
+          );
+        end
+      end
+    end
+  end
+
+  // ------------------------------------------------------------
+  // DEBUG: print the exact values captured on valid_acc and used
+  // for the later valid_out result
+  // ------------------------------------------------------------
+  integer dbg_y;
+  always_ff @(posedge clk) begin
+    if (!rst) begin
+      for (dbg_y = 0; dbg_y < PN; dbg_y++) begin
+        if (valid_out[dbg_y] && (LAYER_ID == 1 || LAYER_ID == 0)) begin
+          $display("[Y_USE] IMG=%0d L=%0d  GP_FROM_L=%0d lane=%0d pop=%0h thr=%0h thr_in=%0h y=%0b out=%0b",
+            image_idx,
+            LAYER_ID,
+            group_count,
+            dbg_y,
+            pop_used_dbg[dbg_y],
+            thr_used_dbg[dbg_y],
+            thr_in_used_dbg[dbg_y],
+            raw_out[dbg_y],
+            out[dbg_y]
+          );
+        end
+      end
+    end
+  end
 
 endmodule

@@ -1,124 +1,139 @@
-module Input_Buffer#(
-    parameter int PN = 8,
-    parameter int PW = 8,
-    parameter int N  = 64,
-    parameter int DATA_NEEDED = 5,
-    localparam int mem_needed = N / PW,
-    localparam int addr_w     = $clog2(mem_needed)
+`timescale 1ns / 1ps
+
+module Input_Bufferv2#(
+    parameter int TN = 22,                           // true image width in bits
+    parameter int PN = 8,                            // width of each incoming word from input layer
+    localparam int mem_needed = (TN + PN - 1) / PN,  // number of PN-wide words needed
+    localparam int PW = mem_needed * PN,             // padded full-image width sent to H0
+    localparam int addr_w = (mem_needed <= 1) ? 1 : $clog2(mem_needed)
 )(
     input  logic                 clk,
     input  logic                 rst,
 
-    input  logic                 clear,        // 1-cycle pulse to reset buffer state for next layer
+    input  logic                 buffer_write,    // writes one PN-wide word into current write bank
+    input  logic                 buffer_read,     // kept for interface compatibility
+    input  logic [addr_w-1:0]    raddr,           // kept for interface compatibility
 
-    input  logic                 buffer_write, // push PN-wide word into FIFO
-    input  logic                 buffer_read,  // read enable for BRAM output
-    input  logic [addr_w-1:0]    raddr,        // BRAM read address
+    input  logic                 read_bank_sel,   // selects which bank is exposed on ostream
+    input  logic                 clear_bank0,     // clears bank0 after it has been used
+    input  logic                 clear_bank1,     // clears bank1 after it has been used
 
-    input  logic [PN-1:0]        istream,      // PN-wide input stream
-    output logic [PW-1:0]        ostream,      // PW-wide output slice
+    input  logic [PN-1:0]        istream,         // incoming PN-wide word from input layer
+    output logic [PW-1:0]        ostream,         // full zero-padded image from selected bank
 
-    output logic                 buffer_ready, // high when BRAM has >= DATA_NEEDED slices
-    output logic                 done          // address is now filled up
+    output logic                 start_allowed_bank0,   // high when bank0 has collected all words
+    output logic                 start_allowed_bank1,   // high when bank1 has collected all words
+    output logic                 buffer_has_addr_bank0, // high when bank0 holds a full image
+    output logic                 buffer_has_addr_bank1, // high when bank1 holds a full image
+    output logic                 buffer_stall           // early backpressure for H0 input path
 );
 
-    logic fifo_empty;
-    logic fifo_full;
-    logic [PW-1:0] fifo_out;
+    // This tracks which bank is currently being filled
+    logic                        write_bank_sel;
 
-    logic counter_go;
-    logic counter_stall;
-    logic counter_valid;
-    logic [addr_w-1:0] wr_addr;
+    // These track how many words have been written into each bank
+    logic [addr_w:0]             word_count_bank0;
+    logic [addr_w:0]             word_count_bank1;
 
-    logic [addr_w:0] bram_size;
+    // These track the next word slot to fill in each bank
+    logic [addr_w-1:0]           wr_addr_bank0;
+    logic [addr_w-1:0]           wr_addr_bank1;
 
-    logic filling;
+    // These say when a write is accepted into a bank
+    logic                        write_accept_bank0;
+    logic                        write_accept_bank1;
 
-    // Buffer becomes ready once enough PW words are stored in BRAM
-    assign buffer_ready = (bram_size >= DATA_NEEDED);
+    // These pulse when the last required word is written into a bank
+    logic                        bank0_full_write;
+    logic                        bank1_full_write;
 
-    // Stall counter when FIFO has no readable slice
-    assign counter_stall = fifo_empty;
+    // These hold one full zero-padded image per bank
+    logic [PW-1:0]               bank0_mem;
+    logic [PW-1:0]               bank1_mem;
 
-    // Start filling once when data first appears, predict empty->nonempty on a write
-    wire start_fill = (!filling) &&
-                      ( (!fifo_empty) ||
-                        (buffer_write && fifo_empty && !fifo_full) );
+    // These define the early-stall threshold for H0
+    localparam int stall_needed = (mem_needed > 2) ? (mem_needed - 2) : mem_needed;
 
-    // consume one PW slice only when counter is producing an address and FIFO has data
-    wire consume_slice = counter_valid && !fifo_empty;
+    // A bank becomes readable only after the whole image has been collected
+    assign start_allowed_bank0 = (word_count_bank0 == mem_needed);
+    assign start_allowed_bank1 = (word_count_bank1 == mem_needed);
 
-    always_ff @(posedge clk) begin
-        if (rst || clear) begin
-            filling <= 1'b0;
+    // These now mean the bank holds one complete readable image
+    assign buffer_has_addr_bank0 = start_allowed_bank0;
+    assign buffer_has_addr_bank1 = start_allowed_bank1;
+
+    // Only the selected write bank can accept data, and only until it is full
+    assign write_accept_bank0 = buffer_write && !write_bank_sel && (word_count_bank0 < mem_needed);
+    assign write_accept_bank1 = buffer_write &&  write_bank_sel && (word_count_bank1 < mem_needed);
+
+    // These detect the exact write that finishes collecting a whole image
+    assign bank0_full_write = write_accept_bank0 && (word_count_bank0 == mem_needed - 1);
+    assign bank1_full_write = write_accept_bank1 && (word_count_bank1 == mem_needed - 1);
+
+    // H0 stalls early so in-flight words from Input_Layer do not overflow the bank
+    always_comb begin
+        if (write_bank_sel)
+            buffer_stall = (word_count_bank1 >= stall_needed);
+        else
+            buffer_stall = (word_count_bank0 >= stall_needed);
+    end
+
+    // This switches banks once the current write bank has collected the full image
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            write_bank_sel <= 1'b0;
         end else begin
-            if (start_fill)
-                filling <= 1'b1;
-            if (done)
-                filling <= 1'b0;
+            if (bank0_full_write)
+                write_bank_sel <= 1'b1;
+            else if (bank1_full_write)
+                write_bank_sel <= 1'b0;
         end
     end
 
-    assign counter_go = start_fill;
+    // This handles fill count, write address, and storage for bank0
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            word_count_bank0 <= '0;
+            wr_addr_bank0    <= '0;
+            bank0_mem        <= '0;
+        end else begin
+            if (clear_bank0) begin
+                word_count_bank0 <= '0;
+                wr_addr_bank0    <= '0;
+                bank0_mem        <= '0;
+            end else if (write_accept_bank0) begin
+                bank0_mem[wr_addr_bank0*PN +: PN] <= istream;
+                word_count_bank0                  <= word_count_bank0 + 1'b1;
+                wr_addr_bank0                     <= wr_addr_bank0 + 1'b1;
+            end
+        end
+    end
 
-    FIFO #(
-      .W_WIDTH        (PN),
-      .R_WIDTH        (PW),
-      .DEPTH          (256),
-      .PFULL_MARGIN   (32),
-      .PEMPTY_MARGIN  (DATA_NEEDED)
-    ) u_fifo (
-      .clk      (clk),
-      .rst      (rst),
+    // This handles fill count, write address, and storage for bank1
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            word_count_bank1 <= '0;
+            wr_addr_bank1    <= '0;
+            bank1_mem        <= '0;
+        end else begin
+            if (clear_bank1) begin
+                word_count_bank1 <= '0;
+                wr_addr_bank1    <= '0;
+                bank1_mem        <= '0;
+            end else if (write_accept_bank1) begin
+                bank1_mem[wr_addr_bank1*PN +: PN] <= istream;
+                word_count_bank1                  <= word_count_bank1 + 1'b1;
+                wr_addr_bank1                     <= wr_addr_bank1 + 1'b1;
+            end
+        end
+    end
 
-      .wr_en    (buffer_write),
-      .wr_data  (istream),
-      .full     (fifo_full),
-      .pfull    (),
-
-      .rd_en    (consume_slice),
-      .rd_data  (fifo_out),
-      .empty    (fifo_empty),
-      .pempty   ()
-    );
-
-    Address_Counter #(
-      .ADDR_W    (addr_w),
-      .MAX_COUNT (mem_needed)
-    ) u_addr_counter (
-      .clk   (clk),
-      .rst   (rst | clear),
-      .go    (counter_go),
-      .stall (counter_stall),
-
-      .addr  (wr_addr),
-      .valid (counter_valid),
-      .done  (done)
-    );
-
-    BRAM #(
-      .DATA_W (PW),
-      .ADDR_W (addr_w)
-    ) u_bram (
-      .clk     (clk),
-      .rst     (rst | clear),
-
-      // Port A write FIFO slices into BRAM
-      .a_ren   (1'b0),
-      .a_wen   (consume_slice),
-      .a_addr  (wr_addr),
-      .a_wdata (fifo_out),
-      .a_rdata (),
-
-      // Port B read side
-      .b_ren   (buffer_read),
-      .b_wen   (1'b0),
-      .b_addr  (raddr),
-      .b_wdata ('0),
-      .b_rdata (ostream),
-
-      .size    (bram_size)
-    );
+    // This exposes the full zero-padded image from the selected read bank
+    always_comb begin
+        if (read_bank_sel)
+            ostream = bank1_mem;
+        else
+            ostream = bank0_mem;
+    end
 
 endmodule

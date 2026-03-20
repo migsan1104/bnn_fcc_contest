@@ -4,7 +4,11 @@ module BRAM #(
     localparam int DEPTH = 1 << ADDR_W
 )(
     input  logic                 clk,
-    input  logic                 rst,      // synchronous reset for size counter
+    input  logic                 rst,     // asynchronous reset for size counter
+    input  logic                 clear,
+
+    // DEBUG: dump full memory contents
+    input  logic                 dump_mem,
 
     // Port A
     input  logic                 a_ren,
@@ -35,12 +39,25 @@ module BRAM #(
   end
 
   // write counter: counts only port A writes
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk or posedge rst) begin
     if (rst) begin
-      size <= '0;                          // reset counter
+      size <= '0;                          // reset counter asynch
     end else begin
-      if (a_wen && size < DEPTH)
+      if (clear) size <= '0;               // reset counter synch
+      else if (a_wen && size < DEPTH[ADDR_W:0])
         size <= size + 1;                  // increment on port A write
+    end
+  end
+
+  // DEBUG dump
+  always_ff @(posedge clk) begin
+    int i;
+    if (dump_mem) begin
+      $display("---- BRAM DUMP START depth=%0d size=%0d ----", DEPTH, size);
+      for (i = 0; i < DEPTH; i++) begin
+        $display("ADDR=%0d DATA=%0h", i, mem[i]);
+      end
+      $display("---- BRAM DUMP END ----");
     end
   end
 

@@ -1,5 +1,5 @@
 module NP_DP #(
-    parameter int PW               = 32,
+    parameter int PW                = 32,
     parameter int TOTAL_BITS_NEURON = 64
 )(
     input  logic clk,
@@ -8,8 +8,9 @@ module NP_DP #(
     input  logic [PW-1:0] x,
     input  logic [PW-1:0] w,
 
+    input  logic acc_en,
     input  logic acc_ld,
-    input logic acc_clr,
+    input  logic acc_clr,
 
     input  logic [$clog2(TOTAL_BITS_NEURON+1)-1:0] threshold,
 
@@ -21,8 +22,8 @@ module NP_DP #(
   localparam int ACC_W = $clog2(TOTAL_BITS_NEURON + 1);
 
   logic [PW-1:0] xnor_bits;
+  logic [POP_W-1:0] popcount_beat;
 
-  // xnor unit
   XNOR_unit #(.PW(PW)) u_xnor (
     .clk (clk),
     .rst (rst),
@@ -31,9 +32,6 @@ module NP_DP #(
     .out (xnor_bits)
   );
 
-  logic [POP_W-1:0] popcount_beat;
-
-  // popcount unit
   Pop_unit #(
     .iwidth(PW),
     .owidth(POP_W)
@@ -44,20 +42,19 @@ module NP_DP #(
     .count (popcount_beat)
   );
 
-  // accumulator unit
   Accum_unit #(
     .iwidth(POP_W),
     .owidth(ACC_W)
   ) u_accum (
     .clk (clk),
     .rst (rst),
+    .en  (acc_en),
     .ld  (acc_ld),
     .clr (acc_clr),
     .din (popcount_beat),
     .acc (popcount_total)
   );
 
-  // threshold unit
   Threshold_unit #(
     .width(ACC_W)
   ) u_thresh (
