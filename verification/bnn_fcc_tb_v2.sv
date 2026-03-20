@@ -33,7 +33,7 @@ module bnn_fcc_tb_v2 #(
     // DUT configuration
     localparam int NON_INPUT_LAYERS = USE_CUSTOM_TOPOLOGY ? CUSTOM_LAYERS - 1 : TRAINED_LAYERS - 1,
     parameter int PARALLEL_INPUTS = 8,
-    parameter int LAYER_PARALLEL_INPUTS[NON_INPUT_LAYERS] = '{8, 256,  16},
+    parameter int LAYER_PARALLEL_INPUTS[NON_INPUT_LAYERS] = '{8, 256, 16},
     parameter int PARALLEL_NEURONS[NON_INPUT_LAYERS]      = '{256, 16, 10}
 );
     import bnn_fcc_tb_pkg::*;
@@ -61,6 +61,7 @@ module bnn_fcc_tb_v2 #(
     BNN_FCC_Model #(CONFIG_BUS_WIDTH) model;
     BNN_FCC_Stimulus #(INPUT_DATA_WIDTH) stim;
     LatencyTracker latency;
+    ThroughputTracker throughput;
 
     typedef bit [CONFIG_BUS_WIDTH-1:0] config_bus_word_t;
     typedef config_bus_word_t config_bus_data_stream_t[];
@@ -75,6 +76,7 @@ module bnn_fcc_tb_v2 #(
     int num_tests;
     int passed;
     int failed;
+    int dbg_img_idx;
 
     // Output/throughput tracking
     int output_count;
@@ -142,7 +144,12 @@ module bnn_fcc_tb_v2 #(
         .data_out_keep (data_out.tkeep),
         .data_out_last (data_out.tlast)
     );
-
+    always @(posedge clk) begin
+    if (!rst && data_in.tvalid && data_in.tready) begin
+        $display("[IN_HS] img=%0d cycle=%0d last=%0b data=%0h",
+                 dbg_img_idx, cycle_count, data_in.tlast, data_in.tdata);
+    end
+   end
     initial begin : generate_clock
         forever #HALF_CLK_PERIOD clk <= ~clk;
     end
@@ -161,6 +168,7 @@ module bnn_fcc_tb_v2 #(
         bit [INPUT_DATA_WIDTH-1:0] current_img[];
         string input_path;
         string output_path;
+
         input_path  = $sformatf("%s/%s", BASE_DIR, MNIST_TEST_VECTOR_INPUT_PATH);
         output_path = $sformatf("%s/%s", BASE_DIR, MNIST_TEST_VECTOR_OUTPUT_PATH);
 
@@ -186,9 +194,11 @@ module bnn_fcc_tb_v2 #(
 
     initial begin : l_init_model
         string path;
-        model   = new();
-        stim    = new(ACTUAL_TOPOLOGY[0]);
-        latency = new(CLK_PERIOD);
+
+        model      = new();
+        stim       = new(ACTUAL_TOPOLOGY[0]);
+        latency    = new(CLK_PERIOD);
+        throughput = new(CLK_PERIOD);
 
         if (!USE_CUSTOM_TOPOLOGY) begin
             $display("--- Loading Trained Model ---");
@@ -275,11 +285,11 @@ module bnn_fcc_tb_v2 #(
         wait (data_in.tready);
         repeat (5) @(posedge clk);
 
-        // Stream all images with no intentional gaps on data_in
+        // Stream all images with no intentional gaps on data_in except DUT backpressure
         for (int i = 0; i < num_tests; i++) begin
             int expected_pred;
             bit [INPUT_DATA_WIDTH-1:0] current_img[];
-
+            dbg_img_idx = i;
             stim.get_vector(i, current_img);
             expected_pred = model.compute_reference(current_img);
             expected_outputs.push_back(expected_pred);
@@ -307,9 +317,15 @@ module bnn_fcc_tb_v2 #(
                     @(posedge clk);
                 end
 
-                if (!first_input_seen && i == 0 && j == 0) begin
-                    first_input_seen  = 1'b1;
-                    first_input_cycle = cycle_count;
+                // Match professor TB throughput start semantics exactly:
+                // start after first beat of first image has been accepted.
+                if (i == 0 && j == 0) begin
+                    throughput.start_test();
+
+                    if (!first_input_seen) begin
+                        first_input_seen  = 1'b1;
+                        first_input_cycle = cycle_count;
+                    end
                 end
 
                 if (j == 0) latency.start_event(i);
@@ -335,6 +351,10 @@ module bnn_fcc_tb_v2 #(
         $display("\nStats:");
         $display("Avg latency (cycles) per image: %0.1f cycles", latency.get_avg_cycles());
         $display("Avg latency (time) per image: %0.1f ns", latency.get_avg_time());
+
+        // Professor TB throughput metric, added exactly the same way he did.
+        $display("Avg throughput (outputs/sec): %0.1f", throughput.get_outputs_per_sec(NUM_TEST_IMAGES));
+        $display("Avg throughput (cycles/output): %0.1f", throughput.get_avg_cycles_per_output(NUM_TEST_IMAGES));
 
         if (first_input_seen && first_output_seen) begin
             longint signed initial_latency_cycles;
@@ -368,7 +388,7 @@ module bnn_fcc_tb_v2 #(
     end
 
     initial begin : l_toggle_ready
-       /* data_out.tready <= 1'b1;
+        data_out.tready <= 1'b1;
         @(posedge clk iff !rst);
         if (TOGGLE_DATA_OUT_READY) begin
             forever begin
@@ -378,15 +398,13 @@ module bnn_fcc_tb_v2 #(
         end else begin
             data_out.tready <= 1'b1;
         end
-        */
-        data_out.tready <= 1'b1;
-       
     end
 
     initial begin : l_output_monitor
         forever begin
             @(posedge clk iff data_out.tvalid && data_out.tready);
-
+            $display("[OUT_HS] t=%0t cycle=%0d data=%0h last=%0b",
+                 $time, cycle_count, data_out.tdata, data_out.tlast);
             assert (expected_outputs.size() > 0)
             else $fatal(1, "No expected output for actual output");
 
@@ -408,6 +426,12 @@ module bnn_fcc_tb_v2 #(
 
             void'(expected_outputs.pop_front());
             latency.end_event(output_count);
+
+            // Match professor TB throughput end semantics exactly:
+            // sample at the last output image.
+            if (output_count == NUM_TEST_IMAGES - 1)
+                throughput.sample_end();
+
             output_count++;
         end
     end

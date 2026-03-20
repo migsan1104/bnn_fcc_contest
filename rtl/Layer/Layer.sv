@@ -197,8 +197,7 @@ module Layer #(
   // For LAYER_ID 2:
   //   print final popcounts when valid_acc arrives.
   //
-  // Only prints for image_idx == 40 as requested.
-  // ------------------------------------------------------------
+
   integer dbg_i;
   always_ff @(posedge clk) begin
     if (!rst) begin

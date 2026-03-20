@@ -6,6 +6,7 @@ module Input_Bufferv1 #(
     parameter int PW       = 8,
     parameter int TN       = 64,
     localparam int writer_id = LAYER_ID,
+
     // Number of PW-wide words needed to hold one full input vector
     localparam int MEM_NEEDED = (TN + PW - 1) / PW,
 
@@ -14,9 +15,6 @@ module Input_Bufferv1 #(
 )(
     input  logic                clk,
     input  logic                rst,
-
-    // DEBUG: which producer is writing this buffer
-   // input  logic [7:0]          writer_id,
 
     // Producer writes one word into the current write bank
     input  logic                buffer_write,
@@ -110,6 +108,10 @@ module Input_Bufferv1 #(
     logic              dump_bank0;
     logic              dump_bank1;
 
+    // DEBUG: delayed dump pulses so the BRAM dump happens one cycle after the final write
+    logic              dump_bank0_reg;
+    logic              dump_bank1_reg;
+
     // DEBUG: remember the first writer that started filling the current image
     logic              writer_seen_bank0;
     logic              writer_seen_bank1;
@@ -146,21 +148,33 @@ module Input_Bufferv1 #(
     assign buffer_has_addr_bank1 = (raddr < bram_size_bank1);
 
     assign write_accept_bank0 =
-    buffer_write && !stall && !write_bank_sel &&
-    !clear_bank0 && (bram_size_bank0 < MEM_NEEDED);
+        buffer_write && !stall && !write_bank_sel &&
+        !clear_bank0 && (bram_size_bank0 < MEM_NEEDED);
 
     assign write_accept_bank1 =
-    buffer_write && !stall &&  write_bank_sel &&
-    !clear_bank1 && (bram_size_bank1 < MEM_NEEDED);
+        buffer_write && !stall &&  write_bank_sel &&
+        !clear_bank1 && (bram_size_bank1 < MEM_NEEDED);
+
     // Detect the exact cycle bank0 becomes full
     assign bank0_full_write = write_accept_bank0 && (bram_size_bank0 == MEM_NEEDED - 1);
 
     // Detect the exact cycle bank1 becomes full
     assign bank1_full_write = write_accept_bank1 && (bram_size_bank1 == MEM_NEEDED - 1);
 
-    // One-cycle debug dump pulses
-    assign dump_bank0 = bank0_full_write;
-    assign dump_bank1 = bank1_full_write;
+    // One-cycle delayed debug dump pulses
+    assign dump_bank0 = dump_bank0_reg;
+    assign dump_bank1 = dump_bank1_reg;
+
+    // Delay BRAM dump by one cycle so the final write is visible in the dump
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            dump_bank0_reg <= 1'b0;
+            dump_bank1_reg <= 1'b0;
+        end else begin
+            dump_bank0_reg <= bank0_full_write;
+            dump_bank1_reg <= bank1_full_write;
+        end
+    end
 
     // The following logic is for write bank selection
     always_ff @(posedge clk or posedge rst) begin
@@ -185,7 +199,7 @@ module Input_Bufferv1 #(
                         write_bank_sel      <= 1'b1;
                         pending_switch_bank <= 1'b0;
                     end else begin
-                        //  If bank 1 is still being read from we have to stall
+                        // If bank1 is still being read from we have to stall
                         pending_switch_bank <= 1'b1;
                         stall               <= 1'b1;
                     end
@@ -206,7 +220,7 @@ module Input_Bufferv1 #(
         end
     end
 
-    // Track the address we need to write to next for bank 0
+    // Track the address we need to write to next for bank0
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
             wr_addr_bank0 <= '0;
@@ -220,7 +234,7 @@ module Input_Bufferv1 #(
         end
     end
 
-    // Tracking the address we need to write to next for bank 1
+    // Track the address we need to write to next for bank1
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
             wr_addr_bank1 <= '0;
@@ -334,7 +348,7 @@ module Input_Bufferv1 #(
         end
     end
 
-    // Bank0 BRAM uses port A for writes and port B for reads, this should be the first bank that is written to and read from
+    // Bank0 BRAM uses port A for writes and port B for reads
     BRAM #(
         .DATA_W (PW),
         .ADDR_W (ADDR_W)
@@ -360,7 +374,6 @@ module Input_Bufferv1 #(
     );
 
     // Bank1 BRAM uses port A for writes and port B for reads
-    // this should be the second one we write to an read from
     BRAM #(
         .DATA_W (PW),
         .ADDR_W (ADDR_W)

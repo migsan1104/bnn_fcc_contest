@@ -79,7 +79,6 @@
 // [DUT Configuration]       (TODO: Adapt to your own DUT if necessary. Feel free to create, ignore, and/or remove parameters)
 // PARALLEL_INPUTS           - Number of inputs/weights processed in parallel in the first hidden layer.
 // PARALLEL_NEURONS          - Number of neurons processed in parallel in each non-input layer.
-
 `timescale 1ns / 100ps
 
 module bnn_fcc_tb #(
@@ -112,20 +111,20 @@ module bnn_fcc_tb #(
     localparam int TRAINED_LAYERS = 4,
     localparam int TRAINED_TOPOLOGY[TRAINED_LAYERS] = '{784, 256, 256, 10},
 
-    // DUT configuration (can be modified or extended for your own DUT)        
+    // DUT configuration (can be modified or extended for your own DUT)
     localparam int NON_INPUT_LAYERS = USE_CUSTOM_TOPOLOGY ? CUSTOM_LAYERS - 1 : TRAINED_LAYERS - 1,
     parameter int PARALLEL_INPUTS = 8,
     parameter int LAYER_PARALLEL_INPUTS[NON_INPUT_LAYERS] = '{8, 256, 16},
-    parameter int PARALLEL_NEURONS[NON_INPUT_LAYERS] = '{256, 16, 10}
+    parameter int PARALLEL_NEURONS[NON_INPUT_LAYERS]      = '{256, 16, 10}
 );
     import bnn_fcc_tb_pkg::*;
 
     localparam int ACTUAL_TOTAL_LAYERS = USE_CUSTOM_TOPOLOGY ? CUSTOM_LAYERS : TRAINED_LAYERS;
     localparam int ACTUAL_TOPOLOGY[ACTUAL_TOTAL_LAYERS] = USE_CUSTOM_TOPOLOGY ? CUSTOM_TOPOLOGY : TRAINED_TOPOLOGY;
 
-    localparam string MNIST_TEST_VECTOR_INPUT_PATH = "test_vectors/inputs.hex";
+    localparam string MNIST_TEST_VECTOR_INPUT_PATH  = "test_vectors/inputs.hex";
     localparam string MNIST_TEST_VECTOR_OUTPUT_PATH = "test_vectors/expected_outputs.txt";
-    localparam string MNIST_MODEL_DATA_PATH = "model_data";
+    localparam string MNIST_MODEL_DATA_PATH         = "model_data";
 
     localparam realtime HALF_CLK_PERIOD = CLK_PERIOD / 2.0;
 
@@ -158,6 +157,17 @@ module bnn_fcc_tb #(
     int num_tests;
     int passed;
     int failed;
+    int dbg_img_idx;
+    int dbg_in_beat_idx;
+
+    // signals used to calculate steady state and initial latency. 
+    int             output_count;
+    longint unsigned cycle_count;
+    bit             first_output_seen;
+    longint signed  first_output_cycle;
+    longint signed  last_output_cycle;
+    bit             first_input_seen;
+    longint signed  first_input_cycle;
 
     logic clk = 1'b0;
     logic rst;
@@ -184,16 +194,16 @@ module bnn_fcc_tb #(
     );
 
     bnn_fcc #(
-        .INPUT_DATA_WIDTH (INPUT_DATA_WIDTH),
-        .INPUT_BUS_WIDTH  (INPUT_BUS_WIDTH),
-        .CONFIG_BUS_WIDTH (CONFIG_BUS_WIDTH),
-        .OUTPUT_DATA_WIDTH(OUTPUT_DATA_WIDTH),
-        .OUTPUT_BUS_WIDTH (OUTPUT_BUS_WIDTH),
-        .TOTAL_LAYERS     (ACTUAL_TOTAL_LAYERS),
-        .TOPOLOGY         (ACTUAL_TOPOLOGY),
-        .PARALLEL_INPUTS  (PARALLEL_INPUTS),
+        .INPUT_DATA_WIDTH      (INPUT_DATA_WIDTH),
+        .INPUT_BUS_WIDTH       (INPUT_BUS_WIDTH),
+        .CONFIG_BUS_WIDTH      (CONFIG_BUS_WIDTH),
+        .OUTPUT_DATA_WIDTH     (OUTPUT_DATA_WIDTH),
+        .OUTPUT_BUS_WIDTH      (OUTPUT_BUS_WIDTH),
+        .TOTAL_LAYERS          (ACTUAL_TOTAL_LAYERS),
+        .TOPOLOGY              (ACTUAL_TOPOLOGY),
+        .PARALLEL_INPUTS       (PARALLEL_INPUTS),
         .LAYER_PARALLEL_INPUTS (LAYER_PARALLEL_INPUTS),
-        .PARALLEL_NEURONS (PARALLEL_NEURONS)
+        .PARALLEL_NEURONS      (PARALLEL_NEURONS)
     ) DUT (
         .clk(clk),
         .rst(rst),
@@ -217,8 +227,32 @@ module bnn_fcc_tb #(
         .data_out_last (data_out.tlast)
     );
 
+    // Input handshake logger using time and accepted beat count.
+    always @(posedge clk) begin
+        if (!rst && data_in.tvalid && data_in.tready) begin
+            $display("[IN_HS] img=%0d beat=%0d t=%0t last=%0b data=%0h",
+                     dbg_img_idx, dbg_in_beat_idx, $time, data_in.tlast, data_in.tdata);
+
+            if (data_in.tlast && dbg_in_beat_idx != 97) begin
+                $display("[IN_WARN] img=%0d last asserted on unexpected beat=%0d at t=%0t",
+                         dbg_img_idx, dbg_in_beat_idx, $time);
+            end
+
+            dbg_in_beat_idx <= dbg_in_beat_idx + 1;
+        end
+    end
+
     initial begin : generate_clock
         forever #HALF_CLK_PERIOD clk <= ~clk;
+    end
+
+    // Tracking steady state output, the throuput after the first output 
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            cycle_count <= 0;
+        end else begin
+            cycle_count <= cycle_count + 1;
+        end
     end
 
     task verify_model();
@@ -226,6 +260,7 @@ module bnn_fcc_tb #(
         bit [INPUT_DATA_WIDTH-1:0] current_img[];
         string input_path;
         string output_path;
+
         input_path  = $sformatf("%s/%s", BASE_DIR, MNIST_TEST_VECTOR_INPUT_PATH);
         output_path = $sformatf("%s/%s", BASE_DIR, MNIST_TEST_VECTOR_OUTPUT_PATH);
 
@@ -240,14 +275,12 @@ module bnn_fcc_tb #(
         for (int i = 0; i < num_tests; i++) begin
             int sv_pred;
             stim.get_vector(i, current_img);
-            sv_pred = model.compute_reference(current_img);  // SV calculates result            
+            sv_pred = model.compute_reference(current_img);  // SV calculates result
 
             // Self-check the SV model.
             if (sv_pred !== python_preds[i]) begin
                 $error("TB LOGIC ERROR: Img %0d. SV Model says %0d, Python says %0d", i, sv_pred, python_preds[i]);
                 $finish;  // Stop immediately, the testbench is broken
-                /*end else begin
-                $display("Img %0d: Class %0d (Matched Python)", i, sv_pred);*/
             end
         end
 
@@ -259,9 +292,10 @@ module bnn_fcc_tb #(
     // ===========================================================================
     initial begin : l_init_model
         string path;
-        model = new();
-        stim = new(ACTUAL_TOPOLOGY[0]);
-        latency = new(CLK_PERIOD);
+
+        model      = new();
+        stim       = new(ACTUAL_TOPOLOGY[0]);
+        latency    = new(CLK_PERIOD);
         throughput = new(CLK_PERIOD);
 
         if (!USE_CUSTOM_TOPOLOGY) begin
@@ -291,20 +325,6 @@ module bnn_fcc_tb #(
         model.print_summary();
 
         if (DEBUG) model.print_model();
-
-        // NOTE: You can also debug by looking at the model's weights, thresholds, and layer ouputs. 
-        // For example, this prints the model for all neurons in the first hidden layer:
-        // for (int i = 0; i < ACTUAL_TOPOLOGY[1]; i++) model.print_neuron(0, i);      
-        //
-        // where the parameters specify the layer and neuron. This loop iterates over all
-        // neurons in the first hidden layer. Note that the parameters treat the first hidden layer
-        // as layer 0, essentially excluding the input layer since it has no neurons.
-        //
-        // Weights are accessible via model.weight[][][], where the dimensions are:
-        // [layer][neuron][bit]
-        //
-        // thresholds are accessible via model.threshold[][], where the dimensions are:
-        // [layer][neuron]
     end
 
     logic [OUTPUT_DATA_WIDTH-1:0] expected_outputs[$];
@@ -314,6 +334,16 @@ module bnn_fcc_tb #(
 
     initial begin : l_sequencer_and_driver
         $timeformat(-9, 0, " ns", 0);
+
+        dbg_in_beat_idx    = 0;
+        passed             = 0;
+        failed             = 0;
+        output_count       = 0;
+        first_output_seen  = 1'b0;
+        first_output_cycle = -1;
+        last_output_cycle  = -1;
+        first_input_seen   = 1'b0;
+        first_input_cycle  = -1;
 
         rst              <= 1'b1;
         config_in.tvalid <= 1'b0;
@@ -341,9 +371,7 @@ module bnn_fcc_tb #(
         for (int i = 0; i < config_bus_data_stream.size(); i++) begin
 
             // Simulate gaps on configuration bus.
-            while (!chance(
-                CONFIG_VALID_PROBABILITY
-            )) begin
+            while (!chance(CONFIG_VALID_PROBABILITY)) begin
                 config_in.tvalid <= 1'b0;
                 @(posedge clk iff config_in.tready);
             end
@@ -362,8 +390,10 @@ module bnn_fcc_tb #(
 
         for (int i = 0; i < num_tests; i++) begin
             int expected_pred;
-            bit expected_bit;
             bit [INPUT_DATA_WIDTH-1:0] current_img[];
+
+            dbg_img_idx     = i;
+            dbg_in_beat_idx = 0;
 
             // Fetch stimulus image i (pre-created by either stim.load_from_file() or stim.generate_random_vectors())
             stim.get_vector(i, current_img);
@@ -391,20 +421,26 @@ module bnn_fcc_tb #(
                 end
 
                 // Simulate gaps on data_in bus.
-                while (!chance(
-                    DATA_IN_VALID_PROBABILITY
-                )) begin
+                while (!chance(DATA_IN_VALID_PROBABILITY)) begin
                     data_in.tvalid <= 1'b0;
                     @(posedge clk iff data_in.tready);
                 end
+
                 data_in.tvalid <= 1'b1;
                 data_in.tlast  <= (j + INPUTS_PER_CYCLE >= current_img.size());
                 @(posedge clk iff data_in.tready);
 
-                // Start the throughput timer after the first beat of the first image has been accepted.                
-                if (i == 0 && j == 0) throughput.start_test();
+                // Added from v2: first accepted input beat tracking
+                if (i == 0 && j == 0) begin
+                    throughput.start_test();
 
-                // Start the latency timer after the first beat of each image has been accepted.                
+                    if (!first_input_seen) begin
+                        first_input_seen  = 1'b1;
+                        first_input_cycle = cycle_count;
+                    end
+                end
+
+                // Start the latency timer after the first beat of each image has been accepted.
                 if (j == 0) latency.start_event(i);
             end
 
@@ -420,6 +456,7 @@ module bnn_fcc_tb #(
 
         disable generate_clock;
         disable l_timeout;
+
         if (passed == num_tests) $display("[%0t] SUCCESS: all %0d tests completed successfully.", $realtime, num_tests);
         else $error("FAILED: %0d out of %0d tests failed.", failed, num_tests);
 
@@ -428,6 +465,38 @@ module bnn_fcc_tb #(
         $display("Avg latency (time) per image: %0.1f ns", latency.get_avg_time());
         $display("Avg throughput (outputs/sec): %0.1f", throughput.get_outputs_per_sec(NUM_TEST_IMAGES));
         $display("Avg throughput (cycles/output): %0.1f", throughput.get_avg_cycles_per_output(NUM_TEST_IMAGES));
+
+        // Added from v2: initial latency report
+        if (first_input_seen && first_output_seen) begin
+            longint signed initial_latency_cycles;
+            real initial_latency_ns;
+
+            initial_latency_cycles = first_output_cycle - first_input_cycle;
+            initial_latency_ns     = real'(initial_latency_cycles) * real'(CLK_PERIOD / 1ns);
+
+            $display("Initial latency measured from first accepted input beat of first image to first valid output");
+            $display("Initial latency (cycles): %0d", initial_latency_cycles);
+            $display("Initial latency (time):   %0.1f ns", initial_latency_ns);
+        end else begin
+            $display("Initial latency: could not be measured.");
+        end
+
+        // Added from v2: steady-state throughput report
+        if (output_count > 1) begin
+            real steady_cycles_per_output;
+            real clk_period_ns;
+            real steady_outputs_per_sec;
+
+            steady_cycles_per_output = real'(last_output_cycle - first_output_cycle) / real'(output_count - 1);
+            clk_period_ns            = real'(CLK_PERIOD / 1ns);
+            steady_outputs_per_sec   = 1.0e9 / (steady_cycles_per_output * clk_period_ns);
+
+            $display("Steady-state throughput starts after first valid output");
+            $display("Steady-state avg cycles/output: %0.2f", steady_cycles_per_output);
+            $display("Steady-state avg outputs/sec:  %0.2f", steady_outputs_per_sec);
+        end else begin
+            $display("Steady-state throughput: not enough outputs to measure.");
+        end
     end
 
     initial begin : l_toggle_ready
@@ -438,21 +507,33 @@ module bnn_fcc_tb #(
                 data_out.tready <= $urandom();
                 @(posedge clk);
             end
-        end else data_out.tready <= 1'b1;
+        end else begin
+            data_out.tready <= 1'b1;
+        end
     end
 
     initial begin : l_output_monitor
-        automatic int output_count = 0;
         forever begin
             @(posedge clk iff data_out.tvalid && data_out.tready);
+
             assert (expected_outputs.size() > 0)
             else $fatal(1, "No expected output for actual output");
+
+            // Added from v2: output timing tracking
+            if (!first_output_seen) begin
+                first_output_seen  = 1'b1;
+                first_output_cycle = cycle_count;
+            end
+            last_output_cycle = cycle_count;
+
             assert (data_out.tdata == expected_outputs[0]) begin
                 passed++;
             end else begin
-                $error("Output incorrect for image %0d: actual = %0d vs expected = %0d", output_count, data_out.tdata, expected_outputs[0]);
+                $fatal("Output incorrect for image %0d: actual = %0d vs expected = %0d",
+                       output_count, data_out.tdata, expected_outputs[0]);
                 failed++;
             end
+
             void'(expected_outputs.pop_front());
             latency.end_event(output_count);
             if (output_count == NUM_TEST_IMAGES - 1) throughput.sample_end();

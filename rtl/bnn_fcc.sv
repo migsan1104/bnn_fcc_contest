@@ -209,7 +209,7 @@ module bnn_fcc #(
     assign start_layer_vec = {LAYERS{all_cfg_done}};
 
     // H0 consumes any valid skid beat once configuration is complete
-    assign consume_skid = skid_valid && all_cfg_done;
+    assign consume_skid = skid_valid && all_cfg_done && !input_buffer_stall_arr[0];
 
     // Upstream is throttled by H0 stall, but the skid buffer still catches one beat safely
     assign data_in_ready = all_cfg_done && skid_ready && !input_buffer_stall_arr[0];

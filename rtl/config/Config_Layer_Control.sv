@@ -228,7 +228,7 @@ module Config_Layer_Control #(
         (t_bits_left_r < TW) &&
         (pack_count_r >= t_bits_left_r);
 
-    // Easy waveform hooks
+    // Used for waveform/transcript debugging
     assign debug_w_words_stored = w_word_count_r;
     assign debug_t_words_stored = t_word_count_r;
 
@@ -488,9 +488,9 @@ module Config_Layer_Control #(
         endcase
     end
 
-    //------------------------------------------------------------
-    // DEBUG PRINTS / ASSERTIONS (remove after verification)
-    //------------------------------------------------------------
+    
+    // DEBUG PRINTS / ASSERTIONS used in the verification version. 
+    
     always_ff @(posedge clk) begin
         int expected_bank;
         int expected_group;

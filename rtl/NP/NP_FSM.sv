@@ -34,7 +34,7 @@ module NP_FSM #(
   // 1 means: next valid_d2_r beat is first popcount beat of a neuron
   logic need_first_pop_r, need_first_pop_d;
 
-  // New: drive valid_acc / valid_out from delayed raw last_in events
+ // This is used to create a pipeline that matchest last in with the rest of the np
   logic [LAT-1:0] last_pipe_r, last_pipe_d;
 
   integer i;
@@ -147,7 +147,7 @@ module NP_FSM #(
           reverse_next_lat = '0;
         end
 
-        // Old current_lat / begin_lat logic is kept inert
+      
         begin_lat_d = 1'b0;
         lat_next    = '0;
 
@@ -166,6 +166,7 @@ module NP_FSM #(
           valid_acc = last_in;
           valid_out = last_pipe_r[0];
         end else begin
+        // this is essentially a shift register
           valid_acc = last_pipe_r[LAT-2];
           valid_out = last_pipe_r[LAT-1];
         end
