@@ -74,12 +74,12 @@ module Input_Layer_tb;
       en <= 1'b0;                 // Disable latch
       @(posedge clk); #1;         // Advance one cycle
 
-      if (valid !== 1'b0) begin   // NEW
+      if (valid !== 1'b0) begin   // checking if valid signal turly works.
         $display("FAIL: valid not 0 when en=0 got=%0b time=%0t", valid, $time);
         $fatal;
       end
 
-      if (ostream !== hold_val) begin
+      if (ostream !== hold_val) begin // checking if enable going low causes the output to change.
         $display("FAIL: ostream changed while en=0 got=0x%0h expected_hold=0x%0h time=%0t", ostream, hold_val, $time);
         $fatal;
       end
@@ -101,7 +101,7 @@ module Input_Layer_tb;
     rst <= 1'b0;                  // Release reset
     @(posedge clk); #1;
 
-    if (ostream !== '0) begin
+    if (ostream !== '0) begin // checking if the reset works
       $display("FAIL: ostream not 0 after reset time=%0t", $time);
       $fatal;
     end
