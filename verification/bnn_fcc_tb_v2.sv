@@ -352,7 +352,7 @@ module bnn_fcc_tb_v2 #(
         $display("Avg latency (cycles) per image: %0.1f cycles", latency.get_avg_cycles());
         $display("Avg latency (time) per image: %0.1f ns", latency.get_avg_time());
 
-        // Professor TB throughput metric, added exactly the same way he did.
+        // This is from stitt
         $display("Avg throughput (outputs/sec): %0.1f", throughput.get_outputs_per_sec(NUM_TEST_IMAGES));
         $display("Avg throughput (cycles/output): %0.1f", throughput.get_avg_cycles_per_output(NUM_TEST_IMAGES));
 
@@ -427,7 +427,7 @@ module bnn_fcc_tb_v2 #(
             void'(expected_outputs.pop_front());
             latency.end_event(output_count);
 
-            // Match professor TB throughput end semantics exactly:
+            
             // sample at the last output image.
             if (output_count == NUM_TEST_IMAGES - 1)
                 throughput.sample_end();
