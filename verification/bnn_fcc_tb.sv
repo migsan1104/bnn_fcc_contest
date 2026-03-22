@@ -79,7 +79,7 @@
 // [DUT Configuration]       (TODO: Adapt to your own DUT if necessary. Feel free to create, ignore, and/or remove parameters)
 // PARALLEL_INPUTS           - Number of inputs/weights processed in parallel in the first hidden layer.
 // PARALLEL_NEURONS          - Number of neurons processed in parallel in each non-input layer.
-`timescale 1ns / 100ps
+`timescale 1ns / 1ps
 
 module bnn_fcc_tb #(
     // Testbench configuration

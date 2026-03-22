@@ -226,7 +226,7 @@ module bnn_fcc #(
     end
 
     // This one register absorbs the extra beat when H0 suddenly stalls
-    AXIS_Skid_Buffer #(
+    Skid_Buffer #(
         .DATA_W (INPUT_BUS_WIDTH),
         .KEEP_W (INPUT_BUS_WIDTH / 8)
     ) u_data_in_skid (
@@ -309,7 +309,7 @@ module bnn_fcc #(
         .final_valid_out        (final_valid_out)
     );
 
-    // Only start argmax when a final popcount vector is ready and the output register is free, I hope to add a fifo to this. 
+    // Only start argmax when a final popcount vector is ready and the output register is free
     assign bnn_count_valid = (|final_valid_acc) && !data_out_valid_r;
 
     // Argmax chooses the class with the largest popcount

@@ -122,7 +122,8 @@ module FIFO #(
         wptr <= wptr + 1;
       end
 
-      // If FIFO was empty and we write a word, immediately expose it via bypass
+      // If FIFO was empty and we write a word, immediately expose it via the bypass logic
+      // this was added to assure FWFT.
       if (!cur_valid && !bypass_active && (word_count == '0) && do_write) begin
         bypass_active <= 1'b1;
         cur_slice     <= '0;

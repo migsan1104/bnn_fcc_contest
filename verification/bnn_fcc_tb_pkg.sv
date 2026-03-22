@@ -9,7 +9,7 @@
 // The package also includes the BNN_FCC_Stimulus class, which provides
 // methods for loading test vectors for images from an existing dataset
 // (e.g., MNIST), or alternatively generating random input images.
-
+`timescale 1ns / 1ps
 package bnn_fcc_tb_pkg;
 
     // Provides a reference model and testing/debugging methods for a BNN

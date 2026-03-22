@@ -445,7 +445,7 @@ module NP_UNIT_tb;
     end
   endtask
 
-  // This one gives a medium-length burst so you can compare against the huge case.
+  // This one gives a medium-length burst, really usefull the first hidden layer of my topology
   task automatic test_16_beats;
     int beat_idx;
     int expected_pop;
